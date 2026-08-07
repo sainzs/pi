@@ -1,0 +1,27 @@
+{
+  "name": "pi-mini-agent",
+  "version": "0.1.0",
+  "description": "A bounded mini-swe-agent-style task runtime any pi agent can summon as a dynamic workflow.",
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "src",
+    "README.md",
+    "PLAN.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.ts",
+    "smoke": "node --experimental-strip-types scripts/smoke.ts"
+  }
+}
