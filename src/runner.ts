@@ -24,8 +24,10 @@ import {
 import { Budget, type BudgetLimits, type ExitReason, type TreeBudget } from "./budget.ts";
 import type { RunResult } from "./envelope.ts";
 import { appendRecord, createLedger } from "./ledger.ts";
+import { captureLeaseBaseline, leaseViolations, observeChanges } from "./lease.ts";
 import { MiniResourceLoader } from "./loader.ts";
 import { buildSystemPrompt, buildTaskMessage } from "./prompt.ts";
+import { runAcceptance } from "./verify.ts";
 import {
 	createLocateTool,
 	createShTool,
@@ -48,6 +50,13 @@ export interface RunOptions {
 	modelRuntime?: ModelRuntime;
 	/** Read-only runs get no write/edit path; `sh` is still granted, so this is advisory. */
 	retrieval: "auto" | "off";
+	/**
+	 * Acceptance predicate: a shell command the HARNESS runs after the child
+	 * finishes; exit 0 defines "done". Shown to the child as its contract.
+	 */
+	accept?: string;
+	/** Write-set lease: glob/path patterns the child may change. Observed, not sandboxed. */
+	lease?: string[];
 	signal?: AbortSignal;
 	onProgress?: (text: string) => void;
 }
@@ -55,6 +64,15 @@ export interface RunOptions {
 export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 	const ledger = createLedger(options.baseDir, options.runId);
 	const budget = new Budget(options.limits, options.tree);
+
+	// Ground truth is captured by the harness before the child exists, so the
+	// envelope's file list can come from observation rather than testimony.
+	const leaseBaseline = await captureLeaseBaseline(options.cwd);
+	appendRecord(ledger.transcript, {
+		type: "lease_baseline",
+		git: leaseBaseline.git,
+		dirtyCount: leaseBaseline.entries.size,
+	});
 
 	const hasLocate = options.retrieval === "auto" && (await scoutCanServe(options.cwd));
 
@@ -103,6 +121,7 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 		limits: options.limits,
 		hasLocate,
 		cwd: options.cwd,
+		lease: options.lease,
 	});
 
 	const { session } = await createAgentSession({
@@ -140,7 +159,7 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 
 	let error: string | undefined;
 	try {
-		await session.prompt(buildTaskMessage(options.task, options.contextPack));
+		await session.prompt(buildTaskMessage(options.task, options.contextPack, options.accept));
 	} catch (cause) {
 		// A budget stop surfaces here as the gate's throw; that is expected control
 		// flow, not a failure to report.
@@ -158,24 +177,57 @@ export async function runMiniAgent(options: RunOptions): Promise<RunResult> {
 		}
 	}
 
-	const exitReason: ExitReason = submitted
+	let exitReason: ExitReason = submitted
 		? "submitted"
 		: (budget.tripped ?? stopReason ?? "error");
+
+	// A dead model binding fails on the FIRST provider call with an auth/config
+	// error. Without this classification it reads as a generic "error" — or
+	// worse, in harnesses without a submission contract, as silent success.
+	// Observed 2026-08-07: a whole dispatch wave "completed" against a disabled
+	// provider having done zero work.
+	if (exitReason === "error" && error && budget.steps <= 1 && BINDING_ERROR_RX.test(error)) {
+		exitReason = "binding_error";
+	}
+
+	// Observation before testimony: what actually changed on disk.
+	const changes = await observeChanges(options.cwd, leaseBaseline);
+	const claimed = submitted?.filesChanged ?? [];
+	const observed = changes.observed;
+	const violations =
+		observed !== undefined ? leaseViolations(observed, options.lease ?? []) : [];
+
+	// The caller's definition of done, run by the harness, after the child is gone.
+	const verification = options.accept
+		? await runAcceptance(options.accept, options.cwd)
+		: undefined;
+	if (verification) {
+		appendRecord(ledger.transcript, { type: "verification", ...verification });
+	}
 
 	const result: RunResult = {
 		exitReason,
 		summary: submitted?.summary ?? fallbackSummary(session, exitReason),
-		filesChanged: submitted?.filesChanged ?? [],
+		filesChanged: observed ?? claimed,
+		filesChangedSource: observed !== undefined ? "observed" : claimed.length > 0 ? "claimed" : "none",
+		claimedFilesChanged: claimed,
+		...(verification ? { verification } : {}),
+		...(violations.length > 0 ? { leaseViolations: violations } : {}),
 		budget: budget.snapshot(),
 		ledgerDir: ledger.dir,
 		steps: budget.steps,
 		costUsd: budget.usd,
 		...(error ? { error } : {}),
+		...(changes.unverifiable ? { error: [error, `[lease] ${changes.unverifiable}`].filter(Boolean).join("; ") } : {}),
 	};
 
 	appendRecord(ledger.transcript, { type: "result", result });
 	return result;
 }
+
+/** Signatures of a dead/misconfigured model binding on the first call. */
+const BINDING_ERROR_RX =
+	/\b401\b|\b403\b|unauthorized|forbidden|api key|apikey|model is disabled|no provider|model not found|missing.*base.?url|invalid.*credential/i;
 
 /**
  * When a run ends without submitting, salvage the last assistant text.

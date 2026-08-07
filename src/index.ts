@@ -127,6 +127,22 @@ export default function (pi: ExtensionAPI) {
 						"`off` restricts it to the shell.",
 				}),
 			),
+			accept: Type.Optional(
+				Type.String({
+					description:
+						"Acceptance predicate: a shell command run BY THE CALLER'S HARNESS after the run " +
+						"ends; exit 0 defines done (e.g. `npm test -- retry` or `test -f out/report.md`). " +
+						"The verdict is attached to the result — declare one whenever done is checkable.",
+				}),
+			),
+			lease: Type.Optional(
+				Type.Array(Type.String(), {
+					description:
+						"Write-set lease: path or glob patterns the run may create/modify (e.g. " +
+						"`src/http/**`). File changes are observed via git after the run; a write outside " +
+						"the lease fails the result. Omit only for read-only work.",
+				}),
+			),
 		}),
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -176,6 +192,8 @@ export default function (pi: ExtensionAPI) {
 					runId,
 					model: (ctx as ExtensionContext | undefined)?.model,
 					retrieval: params.retrieval ?? "auto",
+					accept: params.accept,
+					lease: params.lease,
 					signal: controller.signal,
 					onProgress: (text) =>
 						onUpdate?.({
@@ -184,12 +202,25 @@ export default function (pi: ExtensionAPI) {
 						}),
 				});
 
+				// One routing-ledger row per summon: model, verified outcome, lease
+				// verdict, cost. This is what turns delegation from lore into data —
+				// which model passes which task class at what price is answerable by
+				// grepping audit.ndjson instead of remembering.
+				const model = (ctx as ExtensionContext | undefined)?.model as
+					| { id?: string; provider?: string }
+					| undefined;
 				auditSummon(BASE_DIR, {
 					runId,
 					depth: currentDepth,
 					cwd,
 					task: params.task.slice(0, 400),
+					model: model?.id ?? "inherited-unknown",
+					provider: model?.provider,
 					exitReason: result.exitReason,
+					verified: result.verification ? result.verification.ok : "no-predicate",
+					leaseViolations: result.leaseViolations?.length ?? 0,
+					filesChanged: result.filesChanged.length,
+					filesChangedSource: result.filesChangedSource,
 					steps: result.steps,
 					costUsd: Number(result.costUsd.toFixed(4)),
 					elapsedMs: Date.now() - startedAt,

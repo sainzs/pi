@@ -23,6 +23,8 @@ export type ExitReason =
 	| "wall_limit"
 	| "tree_budget"
 	| "aborted"
+	/** The model binding itself is dead (auth/config failure on the first call). */
+	| "binding_error"
 	| "error";
 
 export interface BudgetLimits {

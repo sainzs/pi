@@ -14,6 +14,7 @@
  */
 
 import type { BudgetSnapshot, ExitReason } from "./budget.ts";
+import type { Verification } from "./verify.ts";
 
 /** ~8 KB, matching the parent-context budget in PLAN.md's acceptance criteria. */
 const MAX_SUMMARY_CHARS = 6_000;
@@ -23,7 +24,18 @@ export interface RunResult {
 	exitReason: ExitReason;
 	/** The model's own submitted summary, or a fallback when it never submitted. */
 	summary: string;
+	/**
+	 * Harness-observed changes when the cwd is a git work tree; otherwise the
+	 * child's claim, and `filesChangedSource` says which one you are reading.
+	 */
 	filesChanged: string[];
+	filesChangedSource: "observed" | "claimed" | "none";
+	/** The child's own claim, kept for discrepancy reporting. */
+	claimedFilesChanged: string[];
+	/** Caller's acceptance predicate verdict; absent when none was declared. */
+	verification?: Verification;
+	/** Observed paths no lease pattern licenses; non-empty fails the envelope. */
+	leaseViolations?: string[];
 	budget: BudgetSnapshot;
 	/** Directory holding the full transcript and elided observations. */
 	ledgerDir: string;
@@ -37,9 +49,17 @@ function cap(text: string, max: number): string {
 	return `${text.slice(0, max)}\n[... ${text.length - max} characters truncated]`;
 }
 
-/** Did this run do what it was asked? Distinct from "did the process exit 0". */
+/**
+ * Did this run do what it was asked? Distinct from "did the process exit 0" —
+ * and, since verification became part of the contract, distinct from "did the
+ * child say so". A submitted run with a failing acceptance predicate or an
+ * out-of-lease write is a failure, whatever its summary claims.
+ */
 export function isFailure(result: RunResult): boolean {
-	return result.exitReason !== "submitted";
+	if (result.exitReason !== "submitted") return true;
+	if (result.verification && !result.verification.ok) return true;
+	if (result.leaseViolations && result.leaseViolations.length > 0) return true;
+	return false;
 }
 
 export function formatEnvelope(result: RunResult): string {
@@ -54,10 +74,43 @@ export function formatEnvelope(result: RunResult): string {
 
 	if (result.error) lines.push(`error: ${cap(result.error, 500)}`);
 
+	if (result.verification) {
+		const v = result.verification;
+		lines.push(
+			v.ok
+				? `verified: PASS — \`${v.command}\` exited 0`
+				: `verified: FAIL — \`${v.command}\` exited ${v.exitCode ?? "none (predicate did not run)"}`,
+		);
+		if (!v.ok && v.output) lines.push(`verify output: ${cap(v.output, 500)}`);
+	}
+
 	if (result.filesChanged.length > 0) {
 		const shown = result.filesChanged.slice(0, MAX_FILES_LISTED);
 		const extra = result.filesChanged.length - shown.length;
-		lines.push(`files touched: ${shown.join(", ")}${extra > 0 ? ` (+${extra} more)` : ""}`);
+		const label =
+			result.filesChangedSource === "observed"
+				? "files changed (observed)"
+				: "files touched (claimed, unverified)";
+		lines.push(`${label}: ${shown.join(", ")}${extra > 0 ? ` (+${extra} more)` : ""}`);
+	}
+
+	if (result.filesChangedSource === "observed") {
+		const observed = new Set(result.filesChanged);
+		const phantom = result.claimedFilesChanged.filter((p) => !observed.has(p));
+		if (phantom.length > 0) {
+			lines.push(
+				`claim mismatch: child claimed but observation shows no change: ${phantom
+					.slice(0, MAX_FILES_LISTED)
+					.join(", ")}`,
+			);
+		}
+	}
+
+	if (result.leaseViolations && result.leaseViolations.length > 0) {
+		lines.push(
+			`lease violations: ${result.leaseViolations.slice(0, MAX_FILES_LISTED).join(", ")} — ` +
+				"the run wrote outside the paths it was licensed to touch.",
+		);
 	}
 
 	lines.push(`transcript: ${result.ledgerDir}`);
@@ -67,6 +120,12 @@ export function formatEnvelope(result: RunResult): string {
 			"",
 			`note: the run stopped on "${result.exitReason}" rather than submitting. Treat the result`,
 			"below as partial and verify anything you rely on.",
+		);
+	} else if (isFailure(result)) {
+		lines.push(
+			"",
+			"note: the run SUBMITTED but failed its contract (see above). Do not treat the summary",
+			"below as success testimony.",
 		);
 	}
 

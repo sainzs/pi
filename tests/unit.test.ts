@@ -159,6 +159,8 @@ function result(overrides: Partial<RunResult> = {}): RunResult {
 		exitReason: "submitted",
 		summary: "done",
 		filesChanged: [],
+		filesChangedSource: "none",
+		claimedFilesChanged: [],
 		budget: b.snapshot(),
 		ledgerDir: "/tmp/x",
 		steps: 3,

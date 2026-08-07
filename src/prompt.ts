@@ -22,10 +22,12 @@ export interface PromptInput {
 	/** True when a `locate` tool is available in this run. */
 	hasLocate: boolean;
 	cwd: string;
+	/** Write-set lease patterns, when the caller declared one. */
+	lease?: string[];
 }
 
 export function buildSystemPrompt(input: PromptInput): string {
-	const { limits, hasLocate, cwd } = input;
+	const { limits, hasLocate, cwd, lease } = input;
 	const lines = [
 		"You are a focused software engineering agent working in a real repository.",
 		"",
@@ -58,6 +60,19 @@ export function buildSystemPrompt(input: PromptInput): string {
 		"the rest of the run considerably more expensive.",
 	];
 
+	if (lease && lease.length > 0) {
+		lines.push(
+			"",
+			"## Boundary",
+			"",
+			"You are licensed to create or modify files matching ONLY these patterns:",
+			...lease.map((pattern) => `- \`${pattern}\``),
+			"",
+			"Every file change is observed by the caller after the run; a write outside these patterns",
+			"fails the run regardless of what you report. Reading is unrestricted.",
+		);
+	}
+
 	if (hasLocate) {
 		lines.push(
 			"",
@@ -79,16 +94,36 @@ export function buildSystemPrompt(input: PromptInput): string {
  * It is data about *this* task, and keeping the system prompt identical across
  * runs preserves the cacheable prefix.
  */
-export function buildTaskMessage(task: string, contextPack: string | undefined): string {
-	if (!contextPack?.trim()) return task;
-	return [
-		task,
-		"",
-		"<context_pack>",
-		"Locations and facts the caller already established. Treat these as reliable and start here",
-		"rather than rediscovering them.",
-		"",
-		contextPack.trim(),
-		"</context_pack>",
-	].join("\n");
+export function buildTaskMessage(
+	task: string,
+	contextPack: string | undefined,
+	accept?: string,
+): string {
+	const parts = [task];
+	if (contextPack?.trim()) {
+		parts.push(
+			"",
+			"<context_pack>",
+			"Locations and facts the caller already established. Treat these as reliable and start here",
+			"rather than rediscovering them.",
+			"",
+			contextPack.trim(),
+			"</context_pack>",
+		);
+	}
+	if (accept?.trim()) {
+		parts.push(
+			"",
+			"<acceptance>",
+			"After you finish, the caller will run this command in the working directory; exit 0 is the",
+			"definition of done:",
+			"",
+			`    ${accept.trim()}`,
+			"",
+			"Run it yourself before calling `submit`. If you cannot make it pass within budget, submit",
+			"anyway and state plainly that it fails and why.",
+			"</acceptance>",
+		);
+	}
+	return parts.join("\n");
 }

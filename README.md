@@ -29,6 +29,46 @@ transcript: ~/.pi/agent/mini-agent/runs/3f9c1a02
 </subagent_result>
 ```
 
+## The verification contract (v0.2)
+
+A child's self-report is a verification request, not a result. Observed across
+harnesses in 2026-08 delegation runs: children reporting "completed" against a
+dead provider having done zero work, and models (haiku, gemini, luna alike)
+fabricating "files modified" lists in both directions. So the runtime verifies;
+the summary is never surfaced without the verdict.
+
+```
+mini(
+  task:   "Fix the flaky retry...",
+  accept: "npm test -- retry",        # run BY THE HARNESS after the child ends; exit 0 = done
+  lease:  ["src/http/**"],            # the write-set the child is licensed to touch
+  steps: 25, usd: 1.50
+)
+```
+
+- **`accept`** — the caller's definition of done, declared before the run,
+  executed by the harness in the cwd after it (30 s timeout, output capped).
+  The child sees it in its task message and is told to run it before
+  submitting. `status: submitted` + `verified: FAIL` is a failure envelope.
+- **`lease`** — path/glob patterns the child may change. When cwd is a git work
+  tree the harness fingerprints the dirty set before the run and diffs it
+  after: `files changed (observed)` comes from git, not from the model; claimed
+  -but-unobserved paths are named as `claim mismatch`; observed-but-unlicensed
+  paths are `lease violations` and fail the envelope. Outside git, the file
+  list is printed as `claimed, unverified` — labelled testimony, never fact.
+  Detection, not sandboxing: a violation fails the result, it does not block
+  the write.
+- **`binding_error`** — an auth/config failure on the first model call (dead
+  key, disabled model, missing base URL) is classified as its own exit reason
+  instead of a generic error, so a dead binding can never read as success.
+- **Routing rows** — every summon appends model id, `verified`, lease verdict,
+  observed-change count and cost to `audit.ndjson`. Which model passes which
+  task class at what price becomes a grep, not a memory.
+
+What this deliberately does not claim: the predicate bounds negligence and
+self-deception, not adversarial children — those are a model-quality problem no
+post-hoc check solves.
+
 ## Install
 
 ```bash
